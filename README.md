@@ -5,7 +5,11 @@ Spectral window analysis for stellar parameter inference in M dwarfs using synth
 ---
 
 data/ → synthetic spectra and processed datasets
+
 figures/ → plots and scientific visualization
+
 notebooks/ → Google Colab notebooks
+
 results/ → model outputs and metrics
+
 src/ → modular Python scripts
