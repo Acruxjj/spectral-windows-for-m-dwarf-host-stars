@@ -216,3 +216,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Astronomy / ML project files
+*.fits
+*.fit
+*.fts
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.npy
+*.npz
+*.csv
+
+# OS files
+.DS_Store
+Thumbs.db
