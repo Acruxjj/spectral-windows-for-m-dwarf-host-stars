@@ -4,6 +4,8 @@ Spectral window analysis for stellar parameter inference in M dwarfs using synth
 
 ---
 
+## Project Structure
+
 data/ → synthetic spectra and processed datasets
 
 figures/ → plots and scientific visualization
