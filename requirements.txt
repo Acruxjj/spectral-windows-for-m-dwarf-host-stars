@@ -1,0 +1,12 @@
+numpy
+pandas
+matplotlib
+tqdm
+juliacall
+juliapkg
+tensorflow
+keras-tuner
+scikit-learn
+corner
+visualkeras
+pillow
