@@ -26,20 +26,6 @@ These baseline tests were performed using simplified synthetic spectra in the 88
 * Surface Gravity (log g)
 * Metallicity ([Fe/H])
 
-The spectra were generated using Korg under simplified assumptions, without instrumental degradation to the CARMENES resolution, without projected rotational velocity (v \sin i), and without detailed chemical abundance variations beyond the adopted metallicity grid.
-
-These experiments demonstrated that the CNN is capable of recovering stellar parameters with strong predictive performance in a controlled synthetic domain.
-
-## Project Status
-
-The `notebooks/baseline/` directory contains the initial proof-of-concept experiments used to validate the 1D CNN architecture for stellar parameter inference.
-
-These baseline tests were performed using simplified synthetic spectra in the 8800–8830 Å spectral window, focusing on the simultaneous regression of:
-
-* Effective Temperature (Teff)
-* Surface Gravity (log g)
-* Metallicity ([Fe/H])
-
 The spectra were generated using Korg under simplified assumptions, without instrumental degradation to the CARMENES resolution, without projected rotational velocity ((v \sin i)), and without detailed chemical abundance variations beyond the adopted metallicity grid.
 
 This spectral window was selected based on previous literature indicating that the 8800–8835 Å region provides the smallest validation error among the tested spectral ranges for M-dwarf parameter inference.
