@@ -1,6 +1,6 @@
 # Identification of Spectral Windows for Stellar Parameter Inference in M Dwarfs and Their Implications for Exoplanet Characterization
 
-Spectral window analysis for stellar parameter inference in M dwarfs using synthetic spectra and 1D CNNs, focusing on the synthetic gap and the propagation of stellar parameter uncertainties into exoplanet characterization.
+This project investigates how the choice of spectral windows affects the inference of stellar parameters (Teff, log g, and [Fe/H]) in M dwarfs using synthetic spectra generated with Korg and 1D convolutional neural networks. Building on previous results obtained in the 8800–8830 Å region, the current work explores multiple spectral windows and increasing levels of physical realism to identify regions that provide more robust parameter recovery. The goal is to assess how spectral window selection and synthetic-domain limitations contribute to the synthetic gap and how these effects propagate into exoplanet characterization.
 
 ---
 
