@@ -1,39 +1,25 @@
-# Identification of Spectral Windows for Stellar Parameter Inference in M Dwarfs and Their Implications for Exoplanet Characterization
+# Spectral Window Dependence in Stellar Parameter Inference of M Dwarfs
 
-Spectral window analysis for stellar parameter inference in M dwarfs using synthetic spectra and 1D CNNs, focusing on the synthetic gap and the propagation of stellar parameter uncertainties into exoplanet characterization.
+Accurate characterization of M dwarf host stars is essential for reliable exoplanet science, as uncertainties in effective temperature (Teff), surface gravity (log g), and metallicity ([Fe/H]) propagate directly into planetary radius estimates, incident flux, habitable zone boundaries, and bulk composition. Spectral regions encode astrophysical information unevenly and exhibit varying sensitivity to stellar parameters and to systematic discrepancies between synthetic and observed spectra (the synthetic gap), whose profile depends on the spectral synthesis code adopted. We investigate dependence of stellar parameter inference on spectral window selection in M dwarfs using high-resolution synthetic spectra generated with Korg (1D LTE), training 1D convolutional neural networks to estimate Teff, log g, and [Fe/H] from multiple spectral regions, including the 8800-8835 Å window previously identified as optimal in PHOENIX-based studies. A comparison across windows under progressively more realistic conditions allows us to assess whether windows identified as optimal in one synthetic domain generalize to others, and to quantify how window-dependent parameter uncertainties propagate into exoplanet characterization, including habitable zone estimates and planetary radius inference.
 
----
+## Setup
 
-## Project Structure
+```bash
+pip install -r requirements.txt
+```
 
-data/ → synthetic spectra and processed datasets
+Korg runs on Julia, so the first time you use it install the Julia package:
 
-figures/ → plots and scientific visualization
+```python
+from src.datagen import install_korg
+install_korg()  # slow, only needs to run once
+```
 
-notebooks/ → Google Colab notebooks
+## References
 
-results/ → model outputs and metrics
-
-src/ → modular Python scripts
-
----
-
-## Project Status
-
-The `notebooks/baseline/` directory contains the initial proof-of-concept experiments used to validate the 1D CNN architecture for stellar parameter inference.
-
-These baseline tests were performed using simplified synthetic spectra in the 8800–8830 Å spectral window, focusing on the simultaneous regression of:
-
-* Effective Temperature (Teff)
-* Surface Gravity (log g)
-* Metallicity ([Fe/H])
-
-The spectra were generated using Korg under simplified assumptions, without instrumental degradation to the CARMENES resolution, without projected rotational velocity (v sin i), and without detailed chemical abundance variations beyond the adopted metallicity grid.
-
-This spectral window was selected based on previous literature indicating that the 8800–8835 Å region provides the smallest validation error among the tested spectral ranges for M-dwarf parameter inference.
-
-The network converged in approximately 27 epochs without evidence of overfitting, achieving (R² = 0.998) for log g and (R² = 0.999) for [Fe/H], with MAE < 0.02 for both parameters and an MAE of approximately 6 K for Teff.
-
-These results demonstrate that the CNN is capable of recovering stellar parameters with strong predictive performance in a controlled synthetic domain, establishing the methodological baseline for the project.
-
-The `notebooks/spectral_windows_analysis/` directory contains the current stage of the project, focused on comparing multiple spectral windows, increasing the physical realism of synthetic spectra, and investigating the impact of stellar parameter uncertainties on exoplanet characterization.
+* Bello-García, A. et al. (2023).  *A&A* , 673, A105.
+* Bonfils, X. et al. (2007).  *A&A* , 474, 293.
+* Fischer, D. A. & Valenti, J. (2005).  *ApJ* , 622, 1102.
+* Passegger, V. M. et al. (2020).  *A&A* , 642, A22.
+* Schweitzer, A. et al. (2019).  *A&A* , 625, A68.
+* Wheeler, A. et al. (2023).  *AJ* , 165, 68.
