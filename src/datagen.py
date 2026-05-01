@@ -65,6 +65,9 @@ def generate_synthetic_spectra_dataset(
     feh_range_dex: tuple[float, float],
     mass_range_msun: tuple[float, float],
     wavelength_window_A: tuple[float, float],
+    R: float | None = None,
+    vsini: float | None = None,
+    vmic: float | None = None,
     max_draw_attempts: int = 500,
     show_progress: bool = True,
     korg=None,
@@ -105,11 +108,20 @@ def generate_synthetic_spectra_dataset(
             logg_cgs = compute_logg_from_mass_radius(mass_msun, radius_rsun)
 
             try:
+                kwargs = {}
+                if R is not None:
+                    kwargs["R"] = R
+                if vsini is not None:
+                    kwargs["vsini"] = vsini
+                if vmic is not None:
+                    kwargs["vmic"] = vmic
+
                 wavelengths_A, flux_norm, cont_norm = korg.synth(
                     Teff=teff_K,
                     logg=logg_cgs,
                     M_H=feh_dex,
                     wavelengths=tuple(wavelength_window_A),
+                    **kwargs,
                 )
                 records.append(
                     {
