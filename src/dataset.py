@@ -1,12 +1,39 @@
 import os
 from dataclasses import dataclass
 from typing import Sequence
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+
+def _save_spectra_parquet(df_spectra: pd.DataFrame, base_path: Path, filename: str) -> Path:
+    """
+    Save a spectra DataFrame to Parquet, converting array columns to float32 lists.
+    Auto-increments filename suffix if the file already exists.
+    """
+    df_parquet = df_spectra.copy()
+    for col in ["wavelength_A", "flux", "continuum"]:
+        df_parquet[col] = df_parquet[col].apply(
+            lambda x: np.asarray(x, dtype=np.float32).tolist()
+        )
+
+    base_path.mkdir(exist_ok=True)
+    full_path = base_path / filename
+
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    if full_path.exists():
+        counter = 1
+        while (base_path / f"{stem}{counter}{suffix}").exists():
+            counter += 1
+        full_path = base_path / f"{stem}{counter}{suffix}"
+
+    df_parquet.to_parquet(full_path, engine="pyarrow", index=False)
+    print(f"Wrote {full_path}")
+    return full_path
 
 
 def load_spectra_parquets(folder_path: str) -> pd.DataFrame:
