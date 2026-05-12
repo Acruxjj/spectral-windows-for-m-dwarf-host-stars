@@ -1,17 +1,12 @@
 import math
 import numpy as np
 import pandas as pd
+from scipy.optimize import brentq
 from tqdm.auto import tqdm
 
-# Limits of the SDSS MARCS grid as used by Korg.interpolate_marcs.
-# Source: Korg.jl documentation, Korg.Fit.ews_to_stellar_parameters
-# default parameter_ranges, and Wheeler et al. (2024), arXiv:2310.19823.
-_MARCS_TEFF_MIN = 2800.0
-_MARCS_TEFF_MAX = 8000.0
-_MARCS_LOGG_MIN = -0.5
-_MARCS_LOGG_MAX = 5.5
-_MARCS_FEH_MIN  = -2.5
-_MARCS_FEH_MAX  =  1.0
+_BONFILS2005_VOLUME_FEH_MEAN = -0.1715
+_BONFILS2005_VOLUME_FEH_SIGMA = 0.195
+
 
 def install_korg() -> None:
     """
@@ -52,12 +47,65 @@ def compute_logg_from_mass_radius(mass_msun: float, radius_rsun: float) -> float
 
 def radius_from_mass(mass_msun: float) -> float:
     """
-    Radius from mass using Schweitzer et al. (2019), A&A 625, A68, eq. 7.
+    Radius from mass using Schweitzer et al. (2019), A&A 625, A68,
+    Equation 7:
 
-    R/Rsun = 0.0282 + 0.935 · (M/Msun),  rms ≈ 0.02 Rsun
+        R/R_sun = 0.0282 + 0.935 * M/M_sun
+
+    Intrinsic scatter is added in radius space with sigma = 0.02 R_sun,
+    matching the rms scatter quoted for the fit.
     """
-    r = 0.0282 + 0.935 * mass_msun + float(np.random.normal(0.0, 0.02))
-    return max(r, 0.05)
+    radius_rsun = 0.0282 + 0.935 * mass_msun
+    radius_rsun += float(np.random.normal(0.0, 0.02))
+    return max(radius_rsun, 0.05)
+
+
+def _mann2015_radius_from_teff(teff_K: float, feh_dex: float) -> float:
+    # Mann+2015 Table 1, Eq. 5 coefficients for R(T_eff/3500, [Fe/H]).
+    a, b, c, d, f_coeff = 16.7700, -54.3210, 57.6627, -19.6994, 0.45650
+    tau = teff_K / 3500.0
+    return (a + b * tau + c * tau**2 + d * tau**3) * (1.0 + f_coeff * feh_dex)
+
+
+def teff_from_radius_mann2015(
+    radius_rsun: float,
+    feh_dex: float,
+    scatter_K: float = 60.0,
+) -> float:
+    """
+    Effective temperature derived by numerically inverting the empirical
+    R(T_eff, [Fe/H]) polynomial of Mann et al. (2015), ApJ 804, 64,
+    Table 1, Equation 5:
+
+        R = (a + b x tau + c x tau^2 + d x tau^3) × (1 + f[Fe/H])
+
+    where tau = T_eff / 3500 K. See table 1 for a, b, c, d and f
+
+    Valid range used from Mann et al. 2015, Section 6.2.
+
+    The root is located via Brent's method on tau in [0.800, 1.143], 
+    the monotonically increasing segment of the cubic for M-dwarf metallicities. 
+    Radii outside the polynomial range at these boundaries are clamped to the 
+    nearest boundary value. Gaussian scatter of 60 K RMS is added to reproduce the T_eff calibration
+    uncertainty reported by Mann et al. (2015, Section 4.3).
+    """
+
+    def poly(tau: float) -> float:
+        return _mann2015_radius_from_teff(tau * 3500.0, feh_dex)
+
+    tau_lo, tau_hi = 2800.0 / 3500.0, 4000.0 / 3500.0
+    r_lo = poly(tau_lo)
+    r_hi = poly(tau_hi)
+
+    if radius_rsun <= r_lo:
+        tau_sol = tau_lo
+    elif radius_rsun >= r_hi:
+        tau_sol = tau_hi
+    else:
+        tau_sol = brentq(lambda tau: poly(tau) - radius_rsun, tau_lo, tau_hi, xtol=1e-6)
+
+    teff_ms = tau_sol * 3500.0
+    return teff_ms + float(np.random.normal(0.0, scatter_K))
 
 
 def _load_korg():
@@ -78,22 +126,41 @@ def generate_synthetic_spectra_dataset(
     R: float | None = None,
     vsini: float | None = None,
     vmic: float | None = None,
+    teff_scatter_K: float = 60.0,
     max_draw_attempts: int = 500,
     show_progress: bool = True,
     synthesize: bool = True,
     korg=None,
 ) -> list[dict]:
     """
-    Draw `num_samples` random (Teff, logg, [Fe/H]) and optionally synthesize
-    each spectrum.
+    Draw `num_samples` physically coupled (T_eff, log g, [Fe/H]) parameter
+    sets and optionally synthesize each spectrum via Korg.
 
-    Radius is derived from mass via the Schweitzer et al. (2019) empirical
-    M-R relation (A&A 625, A68, eq. 7) so that (M, R) pairs stay on the
-    observed M-dwarf sequence rather than filling an unphysical rectangle.
+    Physical coupling of stellar parameters
+    ----------------------------------------
+    The original pipeline sampled T_eff uniformly and independently of mass,
+    producing Spearman rho(T_eff, R_star) ~ 0 instead of the empirical ~+0.87
+    for real M dwarfs (Boyajian et al. 2012, ApJ 757, 112). This made ~84% of
+    synthetic stars physically impossible and rendered absolute HZ distances
+    uninterpretable (diagnosed in notebook 05_implications_for_exoplanets_v2,
+    Section 3).
 
-    Each record carries the input parameters and, if synthesize=True, the Korg
-    output arrays (wavelength, normalized flux, continuum). Samples that raise
-    inside Korg are silently re-drawn up to `max_draw_attempts` times.
+    The corrected sampling chain (per star):
+        1. M_star ~ Uniform(mass_range_msun)
+        2. R_star  = radius_from_mass(M_star)          [Schweitzer et al. 2019]
+        3. [Fe/H]  ~ N(-0.1715, 0.195) clipped         [Bonfils et al. 2005]
+        4. T_eff   = teff_from_radius_mann2015(R_star, [Fe/H])  [Mann et al. 2015]
+        5. log g   = log10(G * M_star / R_star^2)      [standard definition]
+
+    Mann et al. (2019) provides an empirical M_Ks-M_star relation, not a
+    direct mass-radius or mass-temperature relation. Because this generator
+    does not draw absolute K_s magnitudes, Mann et al. (2019) is used here
+    only as a domain check for mass_range_msun; choose masses within their
+    calibrated 0.075-0.70 M_sun interval, preferably away from the edges.
+
+    Stars for which the derived T_eff falls outside teff_range_K, or whose
+    parameters fall outside the MARCS grid, are rejected and redrawn. The
+    teff_range_K parameter is therefore a **filter**, not a sampling range.
 
     Parameters
     ----------
@@ -101,14 +168,21 @@ def generate_synthetic_spectra_dataset(
         Number of stellar parameter sets (and spectra, if synthesize=True)
         to generate.
     teff_range_K : tuple[float, float]
-        Uniform sampling range for effective temperature [K].
+        Accepted range for T_eff [K]. Stars whose mass-derived T_eff falls
+        outside this window are rejected and redrawn. Use the MARCS grid
+        limits (2800, 8000) as a conservative choice; narrower ranges are
+        fine but increase rejection rates.
     feh_range_dex : tuple[float, float]
-        Clip range for [Fe/H] drawn from the Bonfils et al. (2007) Gaussian
-        (mu=-0.05, sigma=0.20 dex).
+        Clip range for [Fe/H] drawn from a Gaussian approximation to the
+        47-star volume-limited nearby M-dwarf metallicity sample in Bonfils
+        et al. (2005), A&A 442, 635 (mean=-0.1715 dex, sample standard
+        deviation=0.195 dex). Their photometric calibration is quoted for
+        [Fe/H] <= +0.2 dex, so (-0.55, +0.20) is a conservative clip range.
     mass_range_msun : tuple[float, float]
-        Uniform sampling range for stellar mass [M_sun].
+        Uniform sampling range for stellar mass [M_sun]. T_eff and R_star are
+        derived from the drawn mass, so this is the primary sampling variable.
     wavelength_window_A : tuple[float, float] | None
-        Spectral window (lambda_min, lambda_max) in Ångströms passed to Korg.
+        Spectral window (lambda_min, lambda_max) in Angstroms passed to Korg.
         Required when synthesize=True, ignored when synthesize=False.
     R : float | None
         Resolving power passed to Korg (optional).
@@ -116,6 +190,10 @@ def generate_synthetic_spectra_dataset(
         Projected rotational velocity [km/s] passed to Korg (optional).
     vmic : float | None
         Microturbulent velocity [km/s] passed to Korg (optional).
+    teff_scatter_K : float
+        Gaussian scatter added to the Mann et al. (2015) T_eff calibration
+        when inverting R(T_eff,[Fe/H]) (default 60 K, the typical T_eff
+        uncertainty reported in Mann et al. 2015, Section 4.3).
     max_draw_attempts : int
         Maximum re-draw attempts per sample before raising RuntimeError.
     show_progress : bool
@@ -138,9 +216,7 @@ def generate_synthetic_spectra_dataset(
     """
     if synthesize:
         if wavelength_window_A is None:
-            raise ValueError(
-                "wavelength_window_A is required when synthesize=True."
-            )
+            raise ValueError("wavelength_window_A is required when synthesize=True.")
         if korg is None:
             korg = _load_korg()
 
@@ -166,14 +242,46 @@ def generate_synthetic_spectra_dataset(
         while attempts < max_draw_attempts:
             attempts += 1
 
-            teff_K = float(np.random.uniform(*teff_range_K))
-            # [Fe/H] drawn from the solar-neighbourhood M-dwarf distribution
-            # (Gaussian, not uniform) then clipped to feh_range_dex.
-            # Bonfils et al. (2007), A&A 474, 293: mu ~ -0.05, sigma ~ 0.20 dex
-            feh_dex = float(np.clip(np.random.normal(-0.05, 0.20), *feh_range_dex))
+            # Sample mass first; derive R_star and T_eff from mass so that
+            # the synthetic sample obeys the empirical M-dwarf main-sequence
+            # coupling (Spearman rho(T_eff, R_star) ~ +0.85 for real M dwarfs,
+            # Boyajian et al. 2012, ApJ 757, 112). Sampling T_eff independently
+            # breaks this coupling and produces physically impossible stars.
             mass_msun = float(np.random.uniform(*mass_range_msun))
-            radius_rsun = radius_from_mass(mass_msun)
+            radius_rsun = radius_from_mass(mass_msun)  # Schweitzer+2019
+
+            # [Fe/H] must be drawn before T_eff: the Mann+2015 R(T_eff,[Fe/H])
+            # inversion requires metallicity. Bonfils et al. (2005), A&A 442, 635
+            # Table 5 gives 47 nearby M dwarfs with mean [Fe/H] = -0.1715 dex
+            # and sample standard deviation = 0.195 dex.
+            feh_dex = float(
+                np.random.normal(
+                    _BONFILS2005_VOLUME_FEH_MEAN,
+                    _BONFILS2005_VOLUME_FEH_SIGMA,
+                )
+            )
+
+            # Reject stars whose mass-derived radius would require a nominal
+            # Mann+2015 T_eff outside the accepted range. This avoids admitting
+            # edge-clamped stars at the cool MARCS boundary after adding scatter.
+            radius_at_teff_min = _mann2015_radius_from_teff(teff_range_K[0], feh_dex)
+            radius_at_teff_max = _mann2015_radius_from_teff(teff_range_K[1], feh_dex)
+            radius_lo, radius_hi = sorted((radius_at_teff_min, radius_at_teff_max))
+            if not (radius_lo <= radius_rsun <= radius_hi):
+                continue
+
+            # T_eff derived by inverting the Mann+2015 R(T_eff,[Fe/H]) polynomial
+            # (ApJ 804, 64, Table 1, Eq. 5). This couples T_eff to R_star through
+            # the empirical M-dwarf main sequence, giving rho_S(T_eff, R_star) ~ +0.87
+            # (Boyajian et al. 2012, ApJ 757, 112) rather than ~0.
+            teff_K = teff_from_radius_mann2015(
+                radius_rsun, feh_dex, scatter_K=teff_scatter_K
+            )
             logg_cgs = compute_logg_from_mass_radius(mass_msun, radius_rsun)
+
+            # teff_range_K is a filter, not a sampling range.
+            if not (teff_range_K[0] <= teff_K <= teff_range_K[1]):
+                continue
 
             record = {
                 "Teff_K": teff_K,
@@ -184,19 +292,6 @@ def generate_synthetic_spectra_dataset(
             }
 
             if not synthesize:
-                # Limits of the SDSS MARCS grid as used by Korg.interpolate_marcs.
-                # Source: Korg.jl documentation, Korg.Fit.ews_to_stellar_parameters
-                # default parameter_ranges, and Wheeler et al. (2024), arXiv:2310.19823.
-                # The cool dwarf regime (Teff <= 4000 K, logg >= 3.5) uses a dedicated
-                # cubic spline scheme; below 2800 K no grid points exist and synthesis fails.
-                # Stars outside the grid are rejected at sampling time to ensure all
-                # generated parameters are synthesizable.
-                if not (
-                    _MARCS_TEFF_MIN <= teff_K  <= _MARCS_TEFF_MAX
-                    and _MARCS_LOGG_MIN <= logg_cgs <= _MARCS_LOGG_MAX
-                    and _MARCS_FEH_MIN  <= feh_dex  <= _MARCS_FEH_MAX
-                ):
-                    continue
                 records.append(record)
                 if pbar:
                     pbar.update(1)
@@ -290,7 +385,12 @@ def synthesize_spectra_from_stars(
 
     records: list[dict] = []
     iterable = (
-        tqdm(df_stars.iterrows(), total=len(df_stars), desc="Synthesizing spectra...", unit="sample")
+        tqdm(
+            df_stars.iterrows(),
+            total=len(df_stars),
+            desc="Synthesizing spectra...",
+            unit="sample",
+        )
         if show_progress
         else df_stars.iterrows()
     )
@@ -308,14 +408,6 @@ def synthesize_spectra_from_stars(
             star_kwargs["vmic"] = star["vmic"]
         elif vmic is not None:
             star_kwargs["vmic"] = vmic
-
-
-        # Limits of the SDSS MARCS grid as used by Korg.interpolate_marcs.
-        # Source: Korg.jl documentation, Korg.Fit.ews_to_stellar_parameters
-        # default parameter_ranges, and Wheeler et al. (2024), arXiv:2310.19823.
-        # The cool dwarf regime (Teff <= 4000 K, logg >= 3.5) uses a dedicated
-        # cubic spline scheme; below 2800 K no grid points exist and synthesis fails.
-        # Stars outside the grid are silently skipped — check len(records) vs len(df_stars).
 
         try:
             wavelengths_A, flux_norm, cont_norm = korg.synth(
