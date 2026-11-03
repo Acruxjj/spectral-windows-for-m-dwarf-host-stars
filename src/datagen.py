@@ -1,0 +1,431 @@
+import math
+import numpy as np
+import pandas as pd
+from scipy.optimize import brentq
+from tqdm.auto import tqdm
+
+_BONFILS2005_VOLUME_FEH_MEAN = -0.1715
+_BONFILS2005_VOLUME_FEH_SIGMA = 0.195
+
+
+def install_korg() -> None:
+    """
+    One-time install of the Korg Julia package into the juliapkg env.
+
+    Run this once after cloning the repo (and again whenever you blow
+    away the Julia env). It is slow, expect several minutes the first
+    time because juliapkg also downloads Julia itself if it is missing.
+
+    https://ajwheeler.github.io/Korg.jl/stable/install/#Using-Korg-from-Python
+    """
+    import juliapkg
+
+    # juliacall 0.9.27 currently resolves cleanly with Julia 1.10.x here.
+    # Letting juliapkg pick the newest Julia can select Julia 1.12 and produce
+    # an OpenSSL_jll compat conflict before Korg is even installed.
+    juliapkg.require_julia("~1.10.0")
+
+    # Resolve before importing juliacall. Importing juliacall starts Julia, so
+    # Korg has to be present in the managed environment first.
+    juliapkg.add("Korg", "acafc109-a718-429c-b0e5-afd7f8c7ae46")
+    juliapkg.resolve()
+
+    from juliacall import Main as jl
+
+    jl.seval("using Korg")
+
+
+def compute_logg_from_mass_radius(mass_msun: float, radius_rsun: float) -> float:
+    """
+    Surface gravity log g (cgs) from mass and radius in solar units.
+
+    log10(g) = log10(M/Msun) - 2*log10(R/Rsun) + 4.437
+    Ref: https://adsabs.harvard.edu/full/2005MSAIS...8..130S
+    """
+    return math.log10(mass_msun) - 2.0 * math.log10(radius_rsun) + 4.437
+
+
+def radius_from_mass(mass_msun: float) -> float:
+    """
+    Radius from mass using Schweitzer et al. (2019), A&A 625, A68,
+    Equation 7:
+
+        R/R_sun = 0.0282 + 0.935 * M/M_sun
+
+    Intrinsic scatter is added in radius space with sigma = 0.02 R_sun,
+    matching the rms scatter quoted for the fit.
+    """
+    radius_rsun = 0.0282 + 0.935 * mass_msun
+    radius_rsun += float(np.random.normal(0.0, 0.02))
+    return max(radius_rsun, 0.05)
+
+
+def _mann2015_radius_from_teff(teff_K: float, feh_dex: float) -> float:
+    # Mann+2015 Table 1, Eq. 5 coefficients for R(T_eff/3500, [Fe/H]).
+    a, b, c, d, f_coeff = 16.7700, -54.3210, 57.6627, -19.6994, 0.45650
+    tau = teff_K / 3500.0
+    return (a + b * tau + c * tau**2 + d * tau**3) * (1.0 + f_coeff * feh_dex)
+
+
+def teff_from_radius_mann2015(
+    radius_rsun: float,
+    feh_dex: float,
+    scatter_K: float = 60.0,
+) -> float:
+    """
+    Effective temperature derived by numerically inverting the empirical
+    R(T_eff, [Fe/H]) polynomial of Mann et al. (2015), ApJ 804, 64,
+    Table 1, Equation 5:
+
+        R = (a + b x tau + c x tau^2 + d x tau^3) × (1 + f[Fe/H])
+
+    where tau = T_eff / 3500 K. See table 1 for a, b, c, d and f
+
+    Valid range used from Mann et al. 2015, Section 6.2.
+
+    The root is located via Brent's method on tau in [0.800, 1.143], 
+    the monotonically increasing segment of the cubic for M-dwarf metallicities. 
+    Radii outside the polynomial range at these boundaries are clamped to the 
+    nearest boundary value. Gaussian scatter of 60 K RMS is added to reproduce the T_eff calibration
+    uncertainty reported by Mann et al. (2015, Section 4.3).
+    """
+
+    def poly(tau: float) -> float:
+        return _mann2015_radius_from_teff(tau * 3500.0, feh_dex)
+
+    tau_lo, tau_hi = 2800.0 / 3500.0, 4000.0 / 3500.0
+    r_lo = poly(tau_lo)
+    r_hi = poly(tau_hi)
+
+    if radius_rsun <= r_lo:
+        tau_sol = tau_lo
+    elif radius_rsun >= r_hi:
+        tau_sol = tau_hi
+    else:
+        tau_sol = brentq(lambda tau: poly(tau) - radius_rsun, tau_lo, tau_hi, xtol=1e-6)
+
+    teff_ms = tau_sol * 3500.0
+    return teff_ms + float(np.random.normal(0.0, scatter_K))
+
+
+def _load_korg():
+    # Imported lazily so callers that don't generate spectra
+    # don't pay the Julia startup cost.
+    from juliacall import Main as jl
+
+    jl.seval("using Korg")
+    return jl.Korg
+
+
+def generate_synthetic_spectra_dataset(
+    num_samples: int,
+    teff_range_K: tuple[float, float],
+    feh_range_dex: tuple[float, float],
+    mass_range_msun: tuple[float, float],
+    wavelength_window_A: tuple[float, float] | None = None,
+    R: float | None = None,
+    vsini: float | None = None,
+    vmic: float | None = None,
+    teff_scatter_K: float = 60.0,
+    max_draw_attempts: int = 500,
+    show_progress: bool = True,
+    synthesize: bool = True,
+    korg=None,
+) -> list[dict]:
+    """
+    Draw `num_samples` physically coupled (T_eff, log g, [Fe/H]) parameter
+    sets and optionally synthesize each spectrum via Korg.
+
+    Physical coupling of stellar parameters
+    ----------------------------------------
+    The original pipeline sampled T_eff uniformly and independently of mass,
+    producing Spearman rho(T_eff, R_star) ~ 0 instead of the empirical ~+0.87
+    for real M dwarfs (Boyajian et al. 2012, ApJ 757, 112). This made ~84% of
+    synthetic stars physically impossible and rendered absolute HZ distances
+    uninterpretable (diagnosed in notebook 05_implications_for_exoplanets_v2,
+    Section 3).
+
+    The corrected sampling chain (per star):
+        1. M_star ~ Uniform(mass_range_msun)
+        2. R_star  = radius_from_mass(M_star)          [Schweitzer et al. 2019]
+        3. [Fe/H]  ~ N(-0.1715, 0.195) clipped         [Bonfils et al. 2005]
+        4. T_eff   = teff_from_radius_mann2015(R_star, [Fe/H])  [Mann et al. 2015]
+        5. log g   = log10(G * M_star / R_star^2)      [standard definition]
+
+    Mann et al. (2019) provides an empirical M_Ks-M_star relation, not a
+    direct mass-radius or mass-temperature relation. Because this generator
+    does not draw absolute K_s magnitudes, Mann et al. (2019) is used here
+    only as a domain check for mass_range_msun; choose masses within their
+    calibrated 0.075-0.70 M_sun interval, preferably away from the edges.
+
+    Stars for which the derived T_eff falls outside teff_range_K, or whose
+    parameters fall outside the MARCS grid, are rejected and redrawn. The
+    teff_range_K parameter is therefore a **filter**, not a sampling range.
+
+    Parameters
+    ----------
+    num_samples : int
+        Number of stellar parameter sets (and spectra, if synthesize=True)
+        to generate.
+    teff_range_K : tuple[float, float]
+        Accepted range for T_eff [K]. Stars whose mass-derived T_eff falls
+        outside this window are rejected and redrawn. Use the MARCS grid
+        limits (2800, 8000) as a conservative choice; narrower ranges are
+        fine but increase rejection rates.
+    feh_range_dex : tuple[float, float]
+        Clip range for [Fe/H] drawn from a Gaussian approximation to the
+        47-star volume-limited nearby M-dwarf metallicity sample in Bonfils
+        et al. (2005), A&A 442, 635 (mean=-0.1715 dex, sample standard
+        deviation=0.195 dex). Their photometric calibration is quoted for
+        [Fe/H] <= +0.2 dex, so (-0.55, +0.20) is a conservative clip range.
+    mass_range_msun : tuple[float, float]
+        Uniform sampling range for stellar mass [M_sun]. T_eff and R_star are
+        derived from the drawn mass, so this is the primary sampling variable.
+    wavelength_window_A : tuple[float, float] | None
+        Spectral window (lambda_min, lambda_max) in Angstroms passed to Korg.
+        Required when synthesize=True, ignored when synthesize=False.
+    R : float | None
+        Resolving power passed to Korg (optional).
+    vsini : float | None
+        Projected rotational velocity [km/s] passed to Korg (optional).
+    vmic : float | None
+        Microturbulent velocity [km/s] passed to Korg (optional).
+    teff_scatter_K : float
+        Gaussian scatter added to the Mann et al. (2015) T_eff calibration
+        when inverting R(T_eff,[Fe/H]) (default 60 K, the typical T_eff
+        uncertainty reported in Mann et al. 2015, Section 4.3).
+    max_draw_attempts : int
+        Maximum re-draw attempts per sample before raising RuntimeError.
+    show_progress : bool
+        Whether to display a tqdm progress bar.
+    synthesize : bool
+        If True (default), synthesizes spectra via Korg and returns records
+        with wavelength_A, flux and continuum keys. If False, returns only
+        the physical stellar parameters without invoking Korg. In both modes,
+        only stars within the MARCS grid limits are accepted.
+    korg : module | None
+        Korg instance. Loaded automatically if None and synthesize=True.
+
+    Returns
+    -------
+    list[dict]
+        If synthesize=True: each dict contains Teff_K, logg_cgs, FeH_dex,
+        Mass_Msun, Radius_Rsun, wavelength_A, flux, continuum.
+        If synthesize=False: each dict contains only Teff_K, logg_cgs,
+        FeH_dex, Mass_Msun, Radius_Rsun.
+    """
+    if synthesize:
+        if wavelength_window_A is None:
+            raise ValueError("wavelength_window_A is required when synthesize=True.")
+        if korg is None:
+            korg = _load_korg()
+
+    # kwargs is built once here because R, vsini, and vmic are call-level constants;
+    # move inside the loop if any of these become per-sample drawn parameters.
+    kwargs = {}
+    if R is not None:
+        kwargs["R"] = R
+    if vsini is not None:
+        kwargs["vsini"] = vsini
+    if vmic is not None:
+        kwargs["vmic"] = vmic
+
+    records: list[dict] = []
+    pbar = (
+        tqdm(total=num_samples, desc="Synthesizing spectra...", unit="sample")
+        if show_progress
+        else None
+    )
+
+    while len(records) < num_samples:
+        attempts = 0
+        while attempts < max_draw_attempts:
+            attempts += 1
+
+            # Sample mass first; derive R_star and T_eff from mass so that
+            # the synthetic sample obeys the empirical M-dwarf main-sequence
+            # coupling (Spearman rho(T_eff, R_star) ~ +0.85 for real M dwarfs,
+            # Boyajian et al. 2012, ApJ 757, 112). Sampling T_eff independently
+            # breaks this coupling and produces physically impossible stars.
+            mass_msun = float(np.random.uniform(*mass_range_msun))
+            radius_rsun = radius_from_mass(mass_msun)  # Schweitzer+2019
+
+            # [Fe/H] must be drawn before T_eff: the Mann+2015 R(T_eff,[Fe/H])
+            # inversion requires metallicity. Bonfils et al. (2005), A&A 442, 635
+            # Table 5 gives 47 nearby M dwarfs with mean [Fe/H] = -0.1715 dex
+            # and sample standard deviation = 0.195 dex.
+            feh_dex = float(
+                np.random.normal(
+                    _BONFILS2005_VOLUME_FEH_MEAN,
+                    _BONFILS2005_VOLUME_FEH_SIGMA,
+                )
+            )
+
+            # Reject stars whose mass-derived radius would require a nominal
+            # Mann+2015 T_eff outside the accepted range. This avoids admitting
+            # edge-clamped stars at the cool MARCS boundary after adding scatter.
+            radius_at_teff_min = _mann2015_radius_from_teff(teff_range_K[0], feh_dex)
+            radius_at_teff_max = _mann2015_radius_from_teff(teff_range_K[1], feh_dex)
+            radius_lo, radius_hi = sorted((radius_at_teff_min, radius_at_teff_max))
+            if not (radius_lo <= radius_rsun <= radius_hi):
+                continue
+
+            # T_eff derived by inverting the Mann+2015 R(T_eff,[Fe/H]) polynomial
+            # (ApJ 804, 64, Table 1, Eq. 5). This couples T_eff to R_star through
+            # the empirical M-dwarf main sequence, giving rho_S(T_eff, R_star) ~ +0.87
+            # (Boyajian et al. 2012, ApJ 757, 112) rather than ~0.
+            teff_K = teff_from_radius_mann2015(
+                radius_rsun, feh_dex, scatter_K=teff_scatter_K
+            )
+            logg_cgs = compute_logg_from_mass_radius(mass_msun, radius_rsun)
+
+            # teff_range_K is a filter, not a sampling range.
+            if not (teff_range_K[0] <= teff_K <= teff_range_K[1]):
+                continue
+
+            record = {
+                "Teff_K": teff_K,
+                "logg_cgs": logg_cgs,
+                "FeH_dex": feh_dex,
+                "Mass_Msun": mass_msun,
+                "Radius_Rsun": radius_rsun,
+            }
+
+            if not synthesize:
+                records.append(record)
+                if pbar:
+                    pbar.update(1)
+                break
+
+            try:
+                wavelengths_A, flux_norm, cont_norm = korg.synth(
+                    Teff=teff_K,
+                    logg=logg_cgs,
+                    M_H=feh_dex,
+                    wavelengths=tuple(wavelength_window_A),
+                    **kwargs,
+                )
+                records.append(
+                    {
+                        **record,
+                        "wavelength_A": wavelengths_A,
+                        "flux": flux_norm,
+                        "continuum": cont_norm,
+                    }
+                )
+                if pbar:
+                    pbar.update(1)
+                break
+
+            except Exception:
+                continue
+
+        if attempts >= max_draw_attempts:
+            if pbar:
+                pbar.close()
+            raise RuntimeError("Could not draw a valid point")
+
+    if pbar:
+        pbar.close()
+
+    return records
+
+
+def synthesize_spectra_from_stars(
+    df_stars: pd.DataFrame,
+    wavelength_window_A: tuple[float, float],
+    R: float | None = None,
+    vsini: float | None = None,
+    vmic: float | None = None,
+    show_progress: bool = True,
+    korg=None,
+) -> list[dict]:
+    """
+    Synthesize spectra for each star in df_stars over a single wavelength window.
+
+    Parameters
+    ----------
+    df_stars : pd.DataFrame
+        DataFrame produced by generate_synthetic_spectra_dataset(..., synthesize=False).
+        Must contain columns: Teff_K, logg_cgs, FeH_dex. Optionally, vsini and
+        vmic columns can be present and will be used per-star, taking priority
+        over the function-level vsini and vmic parameters.
+    wavelength_window_A : tuple[float, float]
+        Spectral window (lambda_min, lambda_max) in Ångströms passed to Korg.
+    R : float | None
+        Resolving power passed to Korg (optional). Instrumental constant,
+        does not vary per star.
+    vsini : float | None
+        Projected rotational velocity [km/s]. Used as fallback if df_stars
+        does not contain a vsini column.
+    vmic : float | None
+        Microturbulent velocity [km/s]. Used as fallback if df_stars does
+        not contain a vmic column.
+    show_progress : bool
+        Whether to display a tqdm progress bar.
+    korg : module | None
+        Korg instance. Loaded automatically if None.
+
+    Returns
+    -------
+    list[dict]
+        Each dict contains all columns from df_stars for that star plus
+        wavelength_A, flux and continuum arrays from Korg. Stars that fall
+        outside the MARCS grid are silently skipped — check len(result) vs
+        len(df_stars) to audit discarded samples.
+    """
+    if korg is None:
+        korg = _load_korg()
+
+    # R is built once here because it is an instrumental constant;
+    # vsini and vmic are resolved per-star inside the loop.
+    kwargs = {}
+    if R is not None:
+        kwargs["R"] = R
+
+    records: list[dict] = []
+    iterable = (
+        tqdm(
+            df_stars.iterrows(),
+            total=len(df_stars),
+            desc="Synthesizing spectra...",
+            unit="sample",
+        )
+        if show_progress
+        else df_stars.iterrows()
+    )
+
+    for _, star in iterable:
+        # vsini and vmic are stellar properties — resolved per star.
+        # Priority: df column (per-star) > function parameter (fallback) > omit.
+        star_kwargs = {**kwargs}
+        if "vsini" in star.index and pd.notna(star["vsini"]):
+            star_kwargs["vsini"] = star["vsini"]
+        elif vsini is not None:
+            star_kwargs["vsini"] = vsini
+
+        if "vmic" in star.index and pd.notna(star["vmic"]):
+            star_kwargs["vmic"] = star["vmic"]
+        elif vmic is not None:
+            star_kwargs["vmic"] = vmic
+
+        try:
+            wavelengths_A, flux_norm, cont_norm = korg.synth(
+                Teff=star["Teff_K"],
+                logg=star["logg_cgs"],
+                M_H=star["FeH_dex"],
+                wavelengths=tuple(wavelength_window_A),
+                **star_kwargs,
+            )
+            records.append(
+                {
+                    **star.to_dict(),
+                    "wavelength_A": wavelengths_A,
+                    "flux": flux_norm,
+                    "continuum": cont_norm,
+                }
+            )
+        except Exception:
+            continue
+
+    return records

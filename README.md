@@ -1,35 +1,26 @@
-# Identification of Spectral Windows for Stellar Parameter Inference in M Dwarfs and Their Implications for Exoplanet Characterization
+# Spectral Window Dependence in Stellar Parameter Inference of M Dwarfs
 
-This project studies how spectral window selection affects the inference of stellar parameters (Teff, log g, and [Fe/H]) in M dwarfs using synthetic spectra generated with Korg, a 1D LTE spectral synthesis code, and one-dimensional convolutional neural networks (1D CNNs). Building on previous results in the 8800–8830 Å region, the current work extends the analysis to multiple spectral windows and progressively more realistic synthetic conditions to evaluate parameter sensitivity across different wavelength ranges. The goal is to assess how spectral window choice and limitations of synthetic models contribute to the synthetic gap and how these effects propagate into exoplanet characterization.
+Accurate characterization of M dwarfs is essential for understanding stellar and planetary system evolution, yet atmospheric parameter inference remains sensitive to spectral window selection, a limitation further compounded by systematic discrepancies between synthetic and observed spectra (the synthetic gap). We trained 1D Convolutional Neural Networks on 5,000 synthetic spectra computed with Korg at CARMENES resolution using physically coupled stellar parameters, evaluating four spectral windows: a positive control (8800-8835 Å), Ca II IRT (8640-8710 Å), TiO (8160-8225 Å), and K I + TiO (7640-7725 Å). TiO bands achieved the best performance for log g (R² = 0.962; MAE = 0.024 dex) and [Fe/H] (R² = 0.982; MAE = 0.019 dex), while the control window yielded the lowest Teff error (MAE = 20.2 K). Robustness tests against rotational broadening (v sin i = 0-120 km s⁻¹) and microturbulence (vmic = 0-3 km s⁻¹) across seven subtypes (M0V-M6V) and three metallicities ([Fe/H] = -0.5, 0.0, +0.2) revealed an accuracy-robustness inversion: the control window is most stable at low rotational velocities (v sin i ≲ 20 km s⁻¹), typical of field M dwarfs, showing that the highest-performing window under ideal conditions is not necessarily the most reliable under physical perturbations. We also show that these parameter residuals propagate into exoplanet observables, with window selection producing differences of up to 3.4% in the habitable-zone location for a 3300 K M dwarf, 4.1% in transit-derived planetary radius, and ~20% in the inferred giant planet occurrence rate. The control window minimized habitable zone propagation; TiO bands produced the smallest errors in planetary radius and giant planet frequency; Ca II IRT and K I + TiO showed the largest degradations depending on the observable. These results establish a quantitative baseline derived entirely from synthetic spectra; the next step is to confront this baseline against real CARMENES observations to quantify the synthetic gap and assess how it propagates into the same exoplanet observables.
 
----
 
-## Project Structure
+## Setup
 
-data/ → synthetic spectra and processed datasets
+```bash
+pip install -r requirements.txt
+```
 
-figures/ → plots and scientific visualization
+Korg runs on Julia, so the first time you use it install the Julia package:
 
-notebooks/ → Google Colab notebooks
+```python
+from src.datagen import install_korg
+install_korg()  # slow, only needs to run once
+```
 
-results/ → model outputs and metrics
+## References
 
-src/ → modular Python scripts
-
----
-
-## Project Status
-
-The `notebooks/baseline/` directory contains the initial proof-of-concept experiments used to validate the 1D CNN architecture for stellar parameter inference.
-
-Baseline tests were performed using simplified synthetic spectra in the 8800–8830 Å region, focusing on the simultaneous regression of effective temperature (Teff), surface gravity (log g), and metallicity ([Fe/H]).
-
-The spectra were generated with Korg, a 1D LTE spectral synthesis code, under simplified assumptions, without instrumental degradation to the CARMENES resolution, without projected rotational velocity (v sin i), and without detailed chemical abundance variations beyond the adopted metallicity grid.
-
-The 8800–8835 Å region was selected based on previous literature reporting the smallest validation error among tested spectral ranges for M-dwarf parameter inference.
-
-The network converged in approximately 27 epochs without evidence of overfitting, achieving R² = 0.998 for log g and R² = 0.999 for [Fe/H], with MAE < 0.02 for both parameters and approximately 6 K for Teff.
-
-These results establish a controlled synthetic baseline for the project, demonstrating that the architecture can recover stellar parameters with high predictive performance under simplified assumptions.
-
-The `notebooks/spectral_windows_analysis/` directory contains the current stage of the project, focused on comparing multiple spectral windows, increasing the physical realism of synthetic spectra, and investigating the impact of stellar parameter uncertainties on exoplanet characterization.
+* Bello-García, A. et al. (2023).  *A&A* , 673, A105.
+* Bonfils, X. et al. (2007).  *A&A* , 474, 293.
+* Fischer, D. A. & Valenti, J. (2005).  *ApJ* , 622, 1102.
+* Passegger, V. M. et al. (2020).  *A&A* , 642, A22.
+* Schweitzer, A. et al. (2019).  *A&A* , 625, A68.
+* Wheeler, A. et al. (2023).  *AJ* , 165, 68.
